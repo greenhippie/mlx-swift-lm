@@ -330,6 +330,11 @@ private enum Language {
         var _positionIds: MLXArray?
         var _ropeDeltas: MLXArray?
 
+        func resetPositionState() {
+            _positionIds = nil
+            _ropeDeltas = nil
+        }
+
         public init(_ args: GlmOcrConfiguration.TextConfiguration) {
             self.model = GlmOcrTextModel(args)
 
@@ -1018,6 +1023,10 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
     public func prepare(_ input: LMInput, cache: [any KVCache], windowSize: Int?) throws
         -> PrepareResult
     {
+        // Reset stale position state from prior inference rounds.
+        // See: https://github.com/ml-explore/mlx-swift-lm/issues/157
+        languageModel.resetPositionState()
+
         let dtype = visionModel.patchEmbed.proj.weight.dtype
 
         var allPixels: MLXArray?

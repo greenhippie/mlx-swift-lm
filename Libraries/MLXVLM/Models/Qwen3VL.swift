@@ -1217,6 +1217,10 @@ enum Qwen3VLLanguage {
 
         private var ropeDeltas: MLXArray? = nil
 
+        func resetRopeState() {
+            ropeDeltas = nil
+        }
+
         init(_ config: Qwen3VLConfiguration) {
             self.config = config
             self.textConfig = config.textConfiguration
@@ -1608,6 +1612,10 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         cache: [any KVCache],
         windowSize _: Int?
     ) throws -> PrepareResult {
+        // Reset stale rope state from prior inference rounds.
+        // See: https://github.com/ml-explore/mlx-swift-lm/issues/157
+        languageModel.resetRopeState()
+
         let inputIds = input.text.tokens
 
         var pixelValues: MLXArray?

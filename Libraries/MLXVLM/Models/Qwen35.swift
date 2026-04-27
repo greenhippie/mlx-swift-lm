@@ -1106,6 +1106,14 @@ public class Qwen35: Module, VLMModel {
         cache: [any KVCache],
         windowSize _: Int?
     ) throws -> PrepareResult {
+        // Reset stale position state from prior inference rounds.
+        // precomputedPositionIds and ropeDeltas are instance state on the
+        // language model that persist across calls. If a previous inference
+        // produced positions for a different sequence length, reusing them
+        // causes a broadcast_shapes crash in the RoPE computation.
+        // See: https://github.com/ml-explore/mlx-swift-lm/issues/157
+        languageModel.resetPositionState()
+
         let inputIds = input.text.tokens
 
         var pixelValues: MLXArray?
@@ -1145,8 +1153,6 @@ public class Qwen35: Module, VLMModel {
                 videoTokenIndex: config.videoTokenIndex
             )
             inputEmbeddings = mergedEmbeds
-        } else {
-            languageModel.resetPositionState()
         }
 
         let typedCache = castCache(cache)
