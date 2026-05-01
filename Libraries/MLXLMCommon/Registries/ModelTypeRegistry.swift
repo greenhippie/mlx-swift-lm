@@ -16,6 +16,11 @@ public actor ModelTypeRegistry<T> {
         self.creators = creators
     }
 
+    /// All registered model type strings (e.g. "qwen3", "llama", "gemma2").
+    public var supportedModelTypes: [String] {
+        Array(creators.keys).sorted()
+    }
+
     /// Add a new model to the type registry.
     public func registerModelType(
         _ type: String, creator: @escaping (Data) throws -> T
