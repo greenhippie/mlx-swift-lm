@@ -405,11 +405,43 @@ public final class ChatSession {
                     messages.append(message.consume())
 
                     // loop can restart on tool calls
+                    // Track whether this is a tool-result restart pass.
+                    // On restart, tools schemas are omitted from UserInput to avoid
+                    // re-rendering the tools system block (already in KV cache).
+                    // A synthetic user message is prepended so chat templates that
+                    // validate for a real user query (e.g. Qwen 3.5's multi_step_tool
+                    // check) don't throw.
+                    var isToolRestart = false
+                    var toolIterations = 0
+                    let maxToolIterations = 3
+
                     restart: while !messages.isEmpty {
+                        print("[ChatSession] Preparing input with \(messages.count) messages: \(messages.map { $0.role.rawValue }), isToolRestart: \(isToolRestart)")
+
+                        let passMessages: [Chat.Message]
+                        let passTools: [[String: any Sendable]]?
+                        if isToolRestart {
+                            // Prepend a minimal user message so the template's
+                            // multi_step_tool validation finds a non-tool-response
+                            // user query and doesn't throw.
+                            var adjusted: [Chat.Message] = [
+                                .user("Process the tool results below and respond.")
+                            ]
+                            adjusted.append(contentsOf: messages)
+                            passMessages = adjusted
+                            passTools = nil  // tools already in KV cache
+                        } else {
+                            passMessages = messages
+                            passTools = tools
+                        }
+
                         let userInput = UserInput(
-                            chat: messages, processing: processing,
-                            tools: tools, additionalContext: additionalContext)
+                            chat: passMessages, processing: processing,
+                            tools: passTools, additionalContext: additionalContext)
                         let input = try await processor.prepare(input: userInput)
+                        let messageCount = messages.count
+                        let promptTokens = input.text.tokens.size
+                        print("[ChatSession] Prepared input: \(promptTokens) prompt tokens, task cancelled: \(Task.isCancelled)")
                         messages.removeAll()
 
                         // generate output
@@ -418,21 +450,28 @@ public final class ChatSession {
                             parameters: generateParameters)
 
                         let (stream, task) = MLXLMCommon.generateTask(
-                            promptTokenCount: input.text.tokens.size,
+                            promptTokenCount: promptTokens,
                             modelConfiguration: modelConfiguration,
                             tokenizer: tokenizer,
                             iterator: iterator
                         )
 
                         var pendingToolCalls: [ToolCall] = []
+                        var chunkCount = 0
 
                         for await item in stream {
-                            // collect tool calls for dispatch; if no
-                            // toolDispatch the caller handles them via
-                            // the transform (streamDetails path)
-                            if let toolCall = item.toolCall, toolDispatch != nil {
-                                pendingToolCalls.append(toolCall)
+                            // Always yield tool calls to the caller for visibility,
+                            // AND collect them for internal dispatch if toolDispatch is set.
+                            if let toolCall = item.toolCall {
+                                if toolDispatch != nil {
+                                    pendingToolCalls.append(toolCall)
+                                }
+                                // Yield tool call event so caller can track it
+                                if let value = transform(item) {
+                                    _ = continuation.yield(value)
+                                }
                             } else if let value = transform(item) {
+                                chunkCount += 1
                                 if case .terminated = continuation.yield(value) {
                                     break
                                 }
@@ -444,21 +483,34 @@ public final class ChatSession {
                         // work may continue (briefly) and use the KVCache
                         await task.value
 
+                        print("[ChatSession] Generation pass done: \(chunkCount) chunks yielded, \(pendingToolCalls.count) tool calls, input had \(messageCount) messages, prompt tokens: \(input.text.tokens.size)")
+
                         // dispatch all tool calls from this generation pass
                         if let toolDispatch, !pendingToolCalls.isEmpty,
                             !Task.isCancelled
                         {
-                            for toolCall in pendingToolCalls {
-                                let toolResult = try await toolDispatch(toolCall)
-                                messages.append(.tool(toolResult))
+                            toolIterations += 1
+                            if toolIterations > maxToolIterations {
+                                print("[ChatSession] Tool iteration limit (\(maxToolIterations)) reached — stopping tool loop")
+                            } else {
+                                for toolCall in pendingToolCalls {
+                                    print("[ChatSession] Dispatching tool: \(toolCall.function.name)")
+                                    let toolResult = try await toolDispatch(toolCall)
+                                    print("[ChatSession] Tool result: \(toolResult.count) chars")
+                                    messages.append(.tool(toolResult))
+                                }
+                                print("[ChatSession] Restarting generation with \(messages.count) tool result messages (iteration \(toolIterations)/\(maxToolIterations))")
+                                isToolRestart = true
+                                continue restart
                             }
-                            continue restart
                         }
                     }
 
+                    print("[ChatSession] Generation loop exited — finishing stream")
                     continuation.finish()
                 }
             } catch {
+                print("[ChatSession] ERROR in generation: \(error)")
                 continuation.finish(throwing: error)
             }
         }
